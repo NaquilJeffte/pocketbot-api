@@ -64,14 +64,21 @@ def requiere_conexion(f):
         return f(*args, **kwargs)
     return wrapper
 
-async def conectar_ws(session_id, is_demo):
+async def conectar_ws(session_id, is_demo, ssid_completo=None):
     urls = [
         "wss://api-l.po.market/socket.io/?EIO=4&transport=websocket",
         "wss://api.po.market/socket.io/?EIO=4&transport=websocket",
     ]
+
+    # PocketOption valida la sesion via cookie en el handshake del WS,
+    # no solo en el mensaje "auth" posterior a la conexion.
+    from urllib.parse import quote
+    cookie_val = quote(ssid_completo) if ssid_completo else session_id
+
     headers = {
         "Origin": "https://pocketoption.com",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Cookie": f"ci_session={cookie_val}",
     }
     datos = {
         "saldo_demo": 0, "saldo_real": 0,
@@ -260,7 +267,7 @@ def conectar():
         }), 400
 
     try:
-        datos = run_async(conectar_ws(session_id, is_demo), timeout=35)
+        datos = run_async(conectar_ws(session_id, is_demo, ssid_completo=ssid), timeout=35)
     except Exception as e:
         log.error(f"Error conectar: {e}")
         datos = {"conectado": False, "saldo_demo": 0, "saldo_real": 0,
