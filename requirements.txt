@@ -1,4 +1,4 @@
 flask==3.0.3
 flask-cors==4.0.1
-BinaryOptionsToolsV2>=2.0.0
+BinaryOptionsTools
 websockets>=12.0
