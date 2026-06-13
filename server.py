@@ -42,7 +42,7 @@ sesion = {
 loop = asyncio.new_event_loop()
 threading.Thread(target=lambda: (asyncio.set_event_loop(loop), loop.run_forever()), daemon=True).start()
 
-def run_async(coro, timeout=35):
+def run_async(coro, timeout=110):
     return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=timeout)
 
 def requiere_key(f):
@@ -66,20 +66,26 @@ def requiere_conexion(f):
 
 async def conectar_ws(session_id, is_demo, ssid_completo=None):
     urls = [
+        "wss://demo-api-eu.po.market/socket.io/?EIO=4&transport=websocket",
+        "wss://api-eu.po.market/socket.io/?EIO=4&transport=websocket",
+        "wss://api-fr2.po.market/socket.io/?EIO=4&transport=websocket",
+        "wss://api-fr.po.market/socket.io/?EIO=4&transport=websocket",
+        "wss://api-c.po.market/socket.io/?EIO=4&transport=websocket",
         "wss://api-l.po.market/socket.io/?EIO=4&transport=websocket",
         "wss://api.po.market/socket.io/?EIO=4&transport=websocket",
     ]
 
-    # PocketOption valida la sesion via cookie en el handshake del WS,
-    # no solo en el mensaje "auth" posterior a la conexion.
-    from urllib.parse import quote
-    cookie_val = quote(ssid_completo) if ssid_completo else session_id
-
     headers = {
         "Origin": "https://pocketoption.com",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Cookie": f"ci_session={cookie_val}",
     }
+
+    # El "session" del mensaje auth debe ser el string COMPLETO del SSID
+    # (la estructura serializada de PHP entera), no solo el session_id de
+    # 32 caracteres. json.dumps escapa correctamente las comillas internas.
+    session_str = ssid_completo if ssid_completo else session_id
+    auth_session_json = json.dumps(session_str)
+
     datos = {
         "saldo_demo": 0, "saldo_real": 0,
         "nombre": "Trader", "email": "", "id": "",
@@ -87,14 +93,14 @@ async def conectar_ws(session_id, is_demo, ssid_completo=None):
     }
     for url in urls:
         try:
-            async with websockets.connect(url, additional_headers=headers, ping_interval=None, open_timeout=10) as ws:
-                await asyncio.wait_for(ws.recv(), timeout=8)
-                auth = f'42["auth",{{"session":"{session_id}","isDemo":{1 if is_demo else 0},"uid":0,"platform":2}}]'
+            async with websockets.connect(url, additional_headers=headers, ping_interval=None, open_timeout=6) as ws:
+                await asyncio.wait_for(ws.recv(), timeout=6)
+                auth = f'42["auth",{{"session":{auth_session_json},"isDemo":{1 if is_demo else 0},"uid":0,"platform":2}}]'
                 await ws.send(auth)
                 inicio = time.time()
-                while time.time() - inicio < 30:
+                while time.time() - inicio < 8:
                     try:
-                        msg = await asyncio.wait_for(ws.recv(), timeout=10)
+                        msg = await asyncio.wait_for(ws.recv(), timeout=4)
 
                         # Log para depuración: ver exactamente qué envía PocketOption
                         log.info(f"WS MSG: {msg[:1000]}")
@@ -267,7 +273,7 @@ def conectar():
         }), 400
 
     try:
-        datos = run_async(conectar_ws(session_id, is_demo, ssid_completo=ssid), timeout=35)
+        datos = run_async(conectar_ws(session_id, is_demo, ssid_completo=ssid), timeout=110)
     except Exception as e:
         log.error(f"Error conectar: {e}")
         datos = {"conectado": False, "saldo_demo": 0, "saldo_real": 0,
