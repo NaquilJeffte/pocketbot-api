@@ -1,5 +1,5 @@
 """
-server.py — PocketOption Bot API v5.0
+server.py — PocketOption Bot API v5.1
 Conecta con PocketOption via WebSocket directo.
 SOLO LECTURA — no compra ni vende.
 """
@@ -42,7 +42,7 @@ sesion = {
 loop = asyncio.new_event_loop()
 threading.Thread(target=lambda: (asyncio.set_event_loop(loop), loop.run_forever()), daemon=True).start()
 
-def run_async(coro, timeout=20):
+def run_async(coro, timeout=35):
     return asyncio.run_coroutine_threadsafe(coro, loop).result(timeout=timeout)
 
 def requiere_key(f):
@@ -85,9 +85,12 @@ async def conectar_ws(session_id, is_demo):
                 auth = f'42["auth",{{"session":"{session_id}","isDemo":{1 if is_demo else 0},"uid":0,"platform":2}}]'
                 await ws.send(auth)
                 inicio = time.time()
-                while time.time() - inicio < 15:
+                while time.time() - inicio < 30:
                     try:
-                        msg = await asyncio.wait_for(ws.recv(), timeout=5)
+                        msg = await asyncio.wait_for(ws.recv(), timeout=10)
+
+                        # Log para depuración: ver exactamente qué envía PocketOption
+                        log.info(f"WS MSG: {msg[:1000]}")
 
                         # Parsear JSON completo
                         try:
@@ -146,12 +149,25 @@ async def conectar_ws(session_id, is_demo):
                             if m:
                                 datos["id"] = m.group(1)
 
-                        if datos["email"] or datos["saldo_demo"] > 0 or datos["saldo_real"] > 0:
+                        # Criterio de conexión más permisivo: cualquier señal de
+                        # que el servidor reconoció la sesión cuenta.
+                        if (
+                            datos["id"]
+                            or datos["nombre"] != "Trader"
+                            or datos["email"]
+                            or datos["saldo_demo"] > 0
+                            or datos["saldo_real"] > 0
+                        ):
                             datos["conectado"] = True
-                            break
+                            # No hacemos break: seguimos escuchando un poco más
+                            # por si llegan datos adicionales (perfil completo,
+                            # balance real, etc.) en mensajes posteriores.
 
                     except asyncio.TimeoutError:
-                        break
+                        # No abandonamos la conexión solo porque un ciclo de
+                        # espera no trajo mensajes; seguimos intentando hasta
+                        # que se agote el tiempo total (30s).
+                        continue
 
             if datos["conectado"]:
                 break
@@ -165,7 +181,7 @@ async def conectar_ws(session_id, is_demo):
 @app.route("/")
 def raiz():
     return jsonify({
-        "api": "PocketOption Bot API", "version": "5.0",
+        "api": "PocketOption Bot API", "version": "5.1",
         "estado": "online", "tu_api_key": API_KEY,
     })
 
@@ -244,7 +260,7 @@ def conectar():
         }), 400
 
     try:
-        datos = run_async(conectar_ws(session_id, is_demo), timeout=25)
+        datos = run_async(conectar_ws(session_id, is_demo), timeout=35)
     except Exception as e:
         log.error(f"Error conectar: {e}")
         datos = {"conectado": False, "saldo_demo": 0, "saldo_real": 0,
@@ -411,6 +427,6 @@ def senal():
     })
 
 if __name__ == "__main__":
-    print(f"PocketOption Bot API v5.0 — puerto {PORT}")
+    print(f"PocketOption Bot API v5.1 — puerto {PORT}")
     print(f"API Key: {API_KEY}")
     app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
