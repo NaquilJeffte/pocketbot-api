@@ -1,5 +1,5 @@
 """
-server.py — PocketOption Bot API v3.0
+server.py — PocketOption Bot API v4.0
 Conecta con PocketOption via WebSocket directo.
 SOLO LECTURA — no compra ni vende.
 """
@@ -14,6 +14,7 @@ import time
 import logging
 import threading
 import re
+import json
 import asyncio
 import websockets
 from datetime import datetime, timezone
@@ -33,6 +34,7 @@ sesion = {
     "ssid": None, "conectado": False, "is_demo": True,
     "saldo_demo": 0, "saldo_real": 0,
     "nombre": "Trader", "email": "", "id": "",
+    "foto_perfil": "",
     "lock": threading.Lock()
 }
 
@@ -70,7 +72,11 @@ async def conectar_ws(session_id, is_demo):
         "Origin": "https://pocketoption.com",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
-    datos = {"saldo_demo": 0, "saldo_real": 0, "nombre": "Trader", "email": "", "id": "", "conectado": False}
+    datos = {
+        "saldo_demo": 0, "saldo_real": 0,
+        "nombre": "Trader", "email": "", "id": "",
+        "foto_perfil": "", "conectado": False
+    }
     for url in urls:
         try:
             async with websockets.connect(url, additional_headers=headers, ping_interval=None, open_timeout=10) as ws:
@@ -78,9 +84,44 @@ async def conectar_ws(session_id, is_demo):
                 auth = f'42["auth",{{"session":"{session_id}","isDemo":{1 if is_demo else 0},"uid":0,"platform":2}}]'
                 await ws.send(auth)
                 inicio = time.time()
-                while time.time() - inicio < 12:
+                while time.time() - inicio < 15:
                     try:
-                        msg = await asyncio.wait_for(ws.recv(), timeout=4)
+                        msg = await asyncio.wait_for(ws.recv(), timeout=5)
+
+                        # Intentar parsear JSON completo
+                        try:
+                            # Buscar JSON dentro del mensaje socket.io
+                            json_match = re.search(r'\[.*\]|\{.*\}', msg, re.DOTALL)
+                            if json_match:
+                                payload = json.loads(json_match.group())
+                                if isinstance(payload, list) and len(payload) > 1:
+                                    data = payload[1]
+                                elif isinstance(payload, dict):
+                                    data = payload
+                                else:
+                                    data = {}
+
+                                # Extraer usuario
+                                user = data.get("user", data.get("profile", {}))
+                                if user:
+                                    datos["id"]     = str(user.get("id", datos["id"]))
+                                    datos["nombre"] = user.get("name", user.get("nick", datos["nombre"]))
+                                    datos["email"]  = user.get("email", datos["email"])
+                                    datos["foto_perfil"] = user.get("avatar", user.get("photo", datos["foto_perfil"]))
+
+                                # Extraer saldo
+                                balance = data.get("balance", data.get("amount", None))
+                                if balance is not None:
+                                    saldo = float(balance)
+                                    if is_demo:
+                                        datos["saldo_demo"] = saldo
+                                    else:
+                                        datos["saldo_real"] = saldo
+
+                        except Exception:
+                            pass
+
+                        # Fallback: regex
                         if "amount" in msg:
                             m = re.search(r'"amount"\s*:\s*([\d.]+)', msg)
                             if m:
@@ -89,30 +130,48 @@ async def conectar_ws(session_id, is_demo):
                                     datos["saldo_demo"] = saldo
                                 else:
                                     datos["saldo_real"] = saldo
-                                datos["conectado"] = True
-                        if "name" in msg:
-                            m = re.search(r'"name"\s*:\s*"([^"]+)"', msg)
+
+                        if "name" in msg or "nick" in msg:
+                            m = re.search(r'"(?:name|nick)"\s*:\s*"([^"]+)"', msg)
                             if m:
                                 datos["nombre"] = m.group(1)
+
                         if "email" in msg:
                             m = re.search(r'"email"\s*:\s*"([^"]+)"', msg)
                             if m:
                                 datos["email"] = m.group(1)
-                        if datos["conectado"]:
+
+                        if "avatar" in msg or "photo" in msg:
+                            m = re.search(r'"(?:avatar|photo)"\s*:\s*"([^"]+)"', msg)
+                            if m:
+                                datos["foto_perfil"] = m.group(1)
+
+                        if "id" in msg:
+                            m = re.search(r'"id"\s*:\s*(\d+)', msg)
+                            if m:
+                                datos["id"] = m.group(1)
+
+                        # Marcar como conectado si tenemos email o saldo
+                        if datos["email"] or datos["saldo_demo"] > 0 or datos["saldo_real"] > 0:
+                            datos["conectado"] = True
                             break
+
                     except asyncio.TimeoutError:
                         break
+
             if datos["conectado"]:
                 break
+
         except Exception as e:
             log.warning(f"Error con {url}: {e}")
             continue
+
     return datos
 
 @app.route("/")
 def raiz():
     return jsonify({
-        "api": "PocketOption Bot API", "version": "3.0",
+        "api": "PocketOption Bot API", "version": "4.0",
         "estado": "online", "tu_api_key": API_KEY,
     })
 
@@ -156,9 +215,11 @@ def conectar():
     body    = request.get_json(force=True)
     ssid    = body.get("ssid", "")
     is_demo = body.get("is_demo", True)
+
     if not ssid:
         return jsonify({"error": "Se requiere el SSID"}), 400
 
+    # Extraer session_id del formato completo de ci_session
     session_id = ssid
     m = re.search(r'session_id["\']?;s:\d+:["\']([a-f0-9]{32})["\']', ssid)
     if m:
@@ -167,34 +228,53 @@ def conectar():
         session_id = ssid.strip()
 
     try:
-        datos = run_async(conectar_ws(session_id, is_demo), timeout=20)
+        datos = run_async(conectar_ws(session_id, is_demo), timeout=25)
     except Exception as e:
+        log.error(f"Error conectar: {e}")
         datos = {"conectado": False, "saldo_demo": 0, "saldo_real": 0,
-                 "nombre": "Trader", "email": "", "id": ""}
+                 "nombre": "Trader", "email": "", "id": "", "foto_perfil": ""}
 
     with sesion["lock"]:
-        sesion["ssid"]       = session_id
-        sesion["is_demo"]    = is_demo
-        sesion["conectado"]  = True
-        sesion["saldo_demo"] = datos.get("saldo_demo", 0)
-        sesion["saldo_real"] = datos.get("saldo_real", 0)
-        sesion["nombre"]     = datos.get("nombre", "Trader")
-        sesion["email"]      = datos.get("email", "")
-        sesion["id"]         = datos.get("id", "")
+        if not datos.get("conectado"):
+            sesion["ssid"]       = None
+            sesion["conectado"]  = False
+            sesion["saldo_demo"] = 0
+            sesion["saldo_real"] = 0
+            sesion["nombre"]     = ""
+            sesion["email"]      = ""
+            sesion["id"]         = ""
+            sesion["foto_perfil"] = ""
+            return jsonify({
+                "ok": False,
+                "error": "SSID invalido o sesion expirada. Obtén un nuevo SSID de pocketoption.com"
+            }), 401
+
+        sesion["ssid"]        = session_id
+        sesion["is_demo"]     = is_demo
+        sesion["conectado"]   = True
+        sesion["saldo_demo"]  = datos["saldo_demo"]
+        sesion["saldo_real"]  = datos["saldo_real"]
+        sesion["nombre"]      = datos["nombre"]
+        sesion["email"]       = datos["email"]
+        sesion["id"]          = datos["id"]
+        sesion["foto_perfil"] = datos.get("foto_perfil", "")
 
     modo  = "DEMO" if is_demo else "REAL"
     saldo = sesion["saldo_demo"] if is_demo else sesion["saldo_real"]
 
     return jsonify({
-        "ok": True, "broker": "PocketOption", "modo": modo,
-        "saldo": round(saldo, 2),
+        "ok":         True,
+        "broker":     "PocketOption",
+        "modo":       modo,
+        "saldo":      round(saldo, 2),
         "saldo_demo": round(sesion["saldo_demo"], 2),
         "saldo_real": round(sesion["saldo_real"], 2),
-        "nombre": sesion["nombre"],
-        "email": sesion["email"],
-        "id": sesion["id"],
-        "moneda": "USD",
-        "mensaje": f"Conectado a PocketOption — {modo}"
+        "nombre":     sesion["nombre"],
+        "email":      sesion["email"],
+        "id":         sesion["id"],
+        "foto_perfil": sesion["foto_perfil"],
+        "moneda":     "USD",
+        "mensaje":    f"Conectado a PocketOption — {modo}"
     })
 
 @app.route("/po/estado")
@@ -204,23 +284,30 @@ def estado():
     modo  = "DEMO" if sesion["is_demo"] else "REAL"
     saldo = sesion["saldo_demo"] if sesion["is_demo"] else sesion["saldo_real"]
     return jsonify({
-        "conectado": True, "broker": "PocketOption", "modo": modo,
+        "conectado":   True,
+        "broker":      "PocketOption",
+        "modo":        modo,
         "saldo_activo": round(saldo, 2),
-        "saldo_demo": round(sesion["saldo_demo"], 2),
-        "saldo_real": round(sesion["saldo_real"], 2),
-        "nombre": sesion["nombre"],
-        "email": sesion["email"],
-        "id": sesion["id"],
+        "saldo_demo":  round(sesion["saldo_demo"], 2),
+        "saldo_real":  round(sesion["saldo_real"], 2),
+        "nombre":      sesion["nombre"],
+        "email":       sesion["email"],
+        "id":          sesion["id"],
+        "foto_perfil": sesion["foto_perfil"],
     })
 
 @app.route("/po/desconectar")
 @requiere_key
 def desconectar():
     with sesion["lock"]:
-        sesion["ssid"] = None
-        sesion["conectado"] = False
-        sesion["saldo_demo"] = 0
-        sesion["saldo_real"] = 0
+        sesion["ssid"]        = None
+        sesion["conectado"]   = False
+        sesion["saldo_demo"]  = 0
+        sesion["saldo_real"]  = 0
+        sesion["nombre"]      = ""
+        sesion["email"]       = ""
+        sesion["id"]          = ""
+        sesion["foto_perfil"] = ""
     return jsonify({"ok": True})
 
 @app.route("/po/activos")
@@ -308,6 +395,6 @@ def senal():
     })
 
 if __name__ == "__main__":
-    print(f"PocketOption Bot API v3.0 — puerto {PORT}")
+    print(f"PocketOption Bot API v4.0 — puerto {PORT}")
     print(f"API Key: {API_KEY}")
     app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
