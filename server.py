@@ -224,13 +224,20 @@ def conectar():
         r'session_id=([^;]+)',
         r'([a-f0-9]{32})'
     ]
+    log.info(f"SSID recibido: {ssid[:300]}")
+
     for p in patterns:
         m = re.search(p, ssid, re.IGNORECASE)
         if m:
-            session_id = m.group(1).strip()
+            session_id = (
+                m.group(1)
+                .strip()
+            )
+            log.info(f"session_id extraido: {session_id}")
             break
 
     if not session_id:
+        log.warning("No se pudo extraer session_id")
         return jsonify({
             "ok": False,
             "error": "Formato de SSID invalido. Asegurate de copiar el valor completo de ci_session"
